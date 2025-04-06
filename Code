@@ -1,0 +1,281 @@
+// PROJECT  : LCD POCKET EMITTER
+// PURPOSE  : ISP Medium Project
+// COURSE   : ISC3U-E
+// AUTHOR   : N. Andrew
+// DATE     : 2025 04 06
+// MCU      : Arduino Nano (ATmega328P)
+// STATUS   : Working
+
+#include <IRremote.hpp>                 // IR library
+#include <LiquidCrystal.h>              // LCD display library
+#include <RH_ASK.h>                     // RF communication library
+#include <SPI.h>                        // Required by RH_ASK
+
+const int RS = 9, EN = 8, D4 = 7, D5 = 6, D6 = 5, D7 = 4;  // LCD pin setup
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);                // LCD object
+
+#define BUTTON_SWITCH A1                  // Switch button
+#define BUTTON_SELECT A2                  // Select button
+#define BUTTON_BACK   A3                  // Back button
+
+#define IR_RECEIVER_PIN  2                // IR receiver pin
+#define IR_SEND_PIN      12               // IR send pin
+
+#define RF_TRANSMIT_PIN  10               // RF transmit pin
+#define RF_RECEIVE_PIN   3                // RF receive pin
+
+RH_ASK rfDriver(2000, RF_RECEIVE_PIN, RF_TRANSMIT_PIN);  // RF driver object
+
+uint32_t storedIRCode = 0;               // Stores IR code
+bool codeStored = false;                 // IR code flag
+
+char storedRFCode[10] = "";              // Stores RF code
+bool rfCodeStored = false;               // RF code flag
+
+int screen = 0;                          // Tracks current screen
+bool state = 0;                          // Tracks selected option
+unsigned long lastDebounceTime = 0;      // For debouncing buttons
+const unsigned long debounceDelay = 200; // Delay for debounce
+
+void setup() {
+  Serial.begin(9600);                                     // Start Serial Monitor
+  lcd.begin(16, 2);                                       // Initialize LCD
+  delay(50);                                              // Short delay
+
+  pinMode(BUTTON_SWITCH, INPUT_PULLUP);                   // Set button pins
+  pinMode(BUTTON_SELECT, INPUT_PULLUP);
+  pinMode(BUTTON_BACK, INPUT_PULLUP);
+  pinMode(IR_SEND_PIN, OUTPUT);                           // Set IR send pin
+
+  IrReceiver.begin(IR_RECEIVER_PIN, ENABLE_LED_FEEDBACK); // Start IR receiver
+  rfDriver.init();                                        // Start RF driver
+
+  displayMainMenu();                                      // Show main menu
+}
+
+void loop() {
+  if (millis() - lastDebounceTime > debounceDelay) {      // Debounce check
+    if (digitalRead(BUTTON_SWITCH) == LOW) {
+      lastDebounceTime = millis();
+      state = !state;                                     // Toggle menu state
+      if (screen == 0) displayMainMenu();
+      else highlightSubMenuOption();
+    }
+
+    if (digitalRead(BUTTON_SELECT) == LOW) {
+      lastDebounceTime = millis();
+      if (screen == 0) {
+        screen = (state == 0) ? 1 : 2;                    // Go to IR or RF menu
+        displaySubMenu();
+      } else if (screen == 1) {
+        if (state == 0) copyIRSignal();                   // Copy IR signal
+        else { screen = 3; displayEmitIR(); }             // Emit IR signal
+      } else if (screen == 2) {
+        if (state == 0) copyRFSignal();                   // Copy RF signal
+        else { screen = 5; displayEmitRF(); }             // Emit RF signal
+      }
+    }
+
+    if (digitalRead(BUTTON_BACK) == LOW) {
+      lastDebounceTime = millis();
+      if (screen == 3 || screen == 4) {
+        screen = 1; displayIRMenu();
+      } else if (screen == 5 || screen == 6) {
+        screen = 2; displayRFMenu();
+      } else {
+        screen = 0; displayMainMenu();                    // Back to main menu
+      }
+    }
+  }
+}
+
+void displayMainMenu() {
+  lcd.clear();
+  lcd.setCursor(1, 0); lcd.print("POCKET EMITTER");
+  lcd.setCursor(3, 1); lcd.print("IR");
+  lcd.setCursor(11, 1); lcd.print("RF");
+  if (state == 0) {
+    lcd.setCursor(1, 1); lcd.print(">");
+    lcd.setCursor(6, 1); lcd.print("<");
+  } else {
+    lcd.setCursor(9, 1); lcd.print(">");
+    lcd.setCursor(14, 1); lcd.print("<");
+  }
+}
+
+void displayIRMenu() {
+  lcd.clear();
+  lcd.setCursor(4, 0); lcd.print("Infrared");
+  lcd.setCursor(2, 1); lcd.print("Copy");
+  lcd.setCursor(10, 1); lcd.print("Emit");
+  state = 0;
+  highlightSubMenuOption();
+}
+
+void displayRFMenu() {
+  lcd.clear();
+  lcd.setCursor(4, 0); lcd.print("Radio Freq");
+  lcd.setCursor(2, 1); lcd.print("Copy");
+  lcd.setCursor(10, 1); lcd.print("Emit");
+  state = 0;
+  highlightSubMenuOption();
+}
+
+void highlightSubMenuOption() {
+  lcd.setCursor(0, 1); lcd.print(" ");
+  lcd.setCursor(6, 1); lcd.print(" ");
+  lcd.setCursor(9, 1); lcd.print(" ");
+  lcd.setCursor(14, 1); lcd.print(" ");
+  if (state == 0) {
+    lcd.setCursor(0, 1); lcd.print(">");
+    lcd.setCursor(6, 1); lcd.print("<");
+  } else {
+    lcd.setCursor(9, 1); lcd.print(">");
+    lcd.setCursor(14, 1); lcd.print("<");
+  }
+}
+
+void displaySubMenu() {
+  if (screen == 1) displayIRMenu();
+  else if (screen == 2) displayRFMenu();
+}
+
+void displayIRStored() {
+  screen = 4;
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Stored HEX:");
+  lcd.setCursor(0, 1); lcd.print("0x");
+  lcd.print(storedIRCode, HEX);
+}
+
+void displayRFStored() {
+  screen = 6;
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Stored RF:");
+  lcd.setCursor(0, 1); lcd.print(storedRFCode);
+}
+
+void displayEmitIR() {
+  lcd.clear();
+  if (!codeStored) {
+    lcd.setCursor(0, 0); lcd.print("No IR Code!");
+    delay(2000);
+    screen = 1;
+    displayIRMenu();
+    return;
+  }
+  lcd.setCursor(0, 0); lcd.print("Emitting: 0x");
+  lcd.print(storedIRCode, HEX);
+  lcd.setCursor(0, 1); lcd.print("Sending...");
+  emitSonyPNP(storedIRCode, 12);
+  delay(500);
+  screen = 1;
+  displayIRStored();
+}
+
+void displayEmitRF() {
+  lcd.clear();
+  if (!rfCodeStored) {
+    lcd.setCursor(0, 0); lcd.print("No RF Code!");
+    delay(2000);
+    screen = 2;
+    displayRFMenu();
+    return;
+  }
+  lcd.setCursor(0, 0); lcd.print("Emitting RF:");
+  lcd.setCursor(0, 1); lcd.print(storedRFCode);
+  emitRFSignal(storedRFCode);
+  delay(1000);
+  screen = 2;
+  displayRFStored();
+}
+
+void copyIRSignal() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Waiting for IR");
+  lcd.setCursor(0, 1); lcd.print("signal...");
+  storedIRCode = 0;
+  codeStored = false;
+  digitalWrite(IR_SEND_PIN, HIGH);
+
+  unsigned long start = millis();
+  while (millis() - start < 5000) {
+    if (IrReceiver.decode()) {
+      if (IrReceiver.decodedIRData.protocol == SONY &&
+          (IrReceiver.decodedIRData.numberOfBits == 12 ||
+           IrReceiver.decodedIRData.numberOfBits == 15 ||
+           IrReceiver.decodedIRData.numberOfBits == 20)) {
+        storedIRCode = IrReceiver.decodedIRData.decodedRawData;
+        codeStored = true;
+        displayIRStored();
+        IrReceiver.resume();
+        return;
+      }
+      IrReceiver.resume();
+    }
+    delay(10);
+  }
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("No SONY Signal");
+  delay(1000);
+  displayIRMenu();
+}
+
+void emitSonyPNP(uint32_t code, uint8_t bits) {
+  const unsigned int mark = 600;
+  const unsigned int spaceOne = 600;
+  const unsigned int spaceZero = 1200;
+  const unsigned int headerMark = 2400;
+  const unsigned int headerSpace = 600;
+
+  for (int r = 0; r < 3; r++) {
+    digitalWrite(IR_SEND_PIN, LOW);
+    delayMicroseconds(headerMark);
+    digitalWrite(IR_SEND_PIN, HIGH);
+    delayMicroseconds(headerSpace);
+
+    for (uint8_t i = 0; i < bits; i++) {
+      digitalWrite(IR_SEND_PIN, LOW);
+      delayMicroseconds(mark);
+      digitalWrite(IR_SEND_PIN, HIGH);
+      if (code & 1) delayMicroseconds(spaceOne);
+      else delayMicroseconds(spaceZero);
+      code >>= 1;
+    }
+    digitalWrite(IR_SEND_PIN, HIGH);
+    delay(10);
+  }
+}
+
+void copyRFSignal() {
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("Listening for RF");
+  lcd.setCursor(0, 1); lcd.print("Signal...");
+  rfCodeStored = false;
+  memset(storedRFCode, 0, sizeof(storedRFCode));
+
+  unsigned long start = millis();
+  while (millis() - start < 5000) {
+    uint8_t buf[RH_ASK_MAX_MESSAGE_LEN];
+    uint8_t buflen = sizeof(buf);
+    if (rfDriver.recv(buf, &buflen)) {
+      for (int i = 0; i < buflen && i < 9; i++) {
+        storedRFCode[i] = (char)buf[i];
+      }
+      storedRFCode[buflen] = ' ';
+      rfCodeStored = true;
+      displayRFStored();
+      return;
+    }
+    delay(10);
+  }
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("No RF Signal");
+  delay(1000);
+  displayRFMenu();
+}
+
+void emitRFSignal(const char* code) {
+  rfDriver.send((uint8_t*)code, strlen(code));
+  rfDriver.waitPacketSent();
+}
